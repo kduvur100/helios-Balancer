@@ -30,14 +30,4 @@ cmake --build build -j$(nproc)
 ./build/helios config/helios.conf
 ```
 
-## Week Roadmap
 
-| Day | Focus |
-|-----|-------|
-| ✅ 1 | Project scaffold + INI config parser |
-| 2 | `BackendPool` — round-robin & least-connections |
-| 3 | `epoll` event loop + connection accept |
-| 4 | Bidirectional TCP proxy / data forwarding |
-| 5 | Health checker background thread |
-| 6 | Signal handling + graceful shutdown |
-| 7 | Demo script + benchmarks + README polish |
