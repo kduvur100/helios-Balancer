@@ -18,6 +18,7 @@ add_compile_options(
 set(SOURCES
   src/main.cpp
   src/config.cpp
+  src/backend_pool.cpp
 )
 
 add_executable(helios ${SOURCES})
