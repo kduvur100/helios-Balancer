@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include "config.hpp"
 #include "backend_pool.hpp"
+#include "event_loop.hpp"
 
 int main(int argc, char* argv[]) {
     const std::string config_path =
@@ -13,8 +14,9 @@ int main(int argc, char* argv[]) {
         << " | |_| |/ _ \\ | |/ _ \\/ __|\n"
         << " |  _  |  __/ | | (_) \\__ \\\n"
         << " |_| |_|\\___|_|_|\\___/|___/\n"
-        << "  TCP Load Balancer  v0.2.0 \n\n";
+        << "  TCP Load Balancer  v0.3.0 \n\n";
 
+    // --- Load + validate config ---
     Config cfg;
     try {
         cfg = Config::from_file(config_path);
@@ -33,41 +35,22 @@ int main(int argc, char* argv[]) {
         << "[config] backends   : " << cfg.backends.size() << "\n"
         << "[config] health     : every " << cfg.health_interval_ms << " ms\n\n";
 
-    // -----------------------------------------------------------------------
-    // Day 2: Build the backend pool and exercise the selection algorithms
-    // -----------------------------------------------------------------------
+    // --- Build backend pool ---
     BackendPool pool(cfg);
 
-    std::cout << "[pool] Registered " << pool.size() << " backend(s):\n";
     for (const auto& b : pool.all())
-        std::cout << "       " << b->host << ":" << b->port << "\n";
+        std::cout << "[pool ] backend  " << b->host << ":" << b->port << "\n";
+    std::cout << "\n";
 
-    // Simulate 9 picks so we can see round-robin cycling across 3 backends
-    std::cout << "\n[pool] Simulating 9 picks (" << algo_name << "):\n";
-    for (int i = 0; i < 9; ++i) {
-        auto b = pool.pick();
-        if (b)
-            std::cout << "  pick[" << i << "] -> "
-                      << b->host << ":" << b->port
-                      << "  (active=" << b->active_connections.load() << ")\n";
-        else
-            std::cout << "  pick[" << i << "] -> NO HEALTHY BACKEND\n";
+    // --- Start epoll event loop (blocks until Ctrl-C) ---
+    try {
+        EventLoop loop(cfg, pool);
+        loop.run();
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] " << e.what() << "\n";
+        return 1;
     }
 
-    // Simulate marking backend[1] unhealthy and verify it is skipped
-    std::cout << "\n[pool] Marking backend[1] unhealthy...\n";
-    pool.all()[1]->healthy.store(false);
-
-    std::cout << "[pool] Simulating 6 picks with backend[1] down:\n";
-    for (int i = 0; i < 6; ++i) {
-        auto b = pool.pick();
-        if (b)
-            std::cout << "  pick[" << i << "] -> "
-                      << b->host << ":" << b->port << "\n";
-        else
-            std::cout << "  pick[" << i << "] -> NO HEALTHY BACKEND\n";
-    }
-
-    std::cout << "\n[helios] BackendPool ready — epoll event loop coming in Day 3.\n";
+    std::cout << "[helios] shutdown complete.\n";
     return 0;
 }

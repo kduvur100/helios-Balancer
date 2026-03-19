@@ -19,6 +19,8 @@ set(SOURCES
   src/main.cpp
   src/config.cpp
   src/backend_pool.cpp
+  src/listener.cpp
+  src/event_loop.cpp
 )
 
 add_executable(helios ${SOURCES})
