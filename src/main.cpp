@@ -14,7 +14,7 @@ int main(int argc, char* argv[]) {
         << " | |_| |/ _ \\ | |/ _ \\/ __|\n"
         << " |  _  |  __/ | | (_) \\__ \\\n"
         << " |_| |_|\\___|_|_|\\___/|___/\n"
-        << "  TCP Load Balancer  v0.3.0 \n\n";
+        << "  TCP Load Balancer  v0.4.0 \n\n";
 
     // --- Load + validate config ---
     Config cfg;

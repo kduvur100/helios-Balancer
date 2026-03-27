@@ -288,11 +288,10 @@ void EventLoop::handle_connect(Connection& conn) {
         return;
     }
 
-    // Re-arm backend_fd: now we want to read upstream responses
-    epoll_mod(conn.backend_fd, EPOLLIN, /*edge_triggered=*/true);
-
-    // Activate client_fd: start receiving data from the client
-    epoll_add(conn.client_fd, EPOLLIN, /*edge_triggered=*/true);
+    // Use level-triggered (no EPOLLET) for active connections so we never
+    // miss data that arrived between connect() completing and epoll_wait().
+    epoll_mod(conn.backend_fd, EPOLLIN | EPOLLRDHUP, /*edge_triggered=*/false);
+    epoll_add(conn.client_fd,  EPOLLIN | EPOLLRDHUP, /*edge_triggered=*/false);
 
     conn.state = ConnState::ACTIVE;
 
@@ -304,20 +303,100 @@ void EventLoop::handle_connect(Connection& conn) {
 }
 
 // ---------------------------------------------------------------------------
-// handle_active — bidirectional data forwarding (Day 4 placeholder).
+// splice_once — drain src_fd into dst_fd until EAGAIN or EOF.
 //
-// Day 4 will implement the splice loop:
-//   EPOLLIN on client_fd  → read from client,  write to backend_fd
-//   EPOLLIN on backend_fd → read from backend, write to client_fd
-//   EOF / error on either → mark CLOSING, flush the other direction
+// Uses a 64 KiB stack buffer; no heap allocation per read.
+// Returns the number of bytes forwarded, or -1 on a hard error.
+// Sets *got_eof = true if src_fd signalled EOF (read returned 0).
+//
+// Write failures (EPIPE / ECONNRESET) are treated as fatal for the session.
+// ---------------------------------------------------------------------------
+
+static ssize_t splice_once(int src_fd, int dst_fd, bool* got_eof) {
+    static constexpr size_t BUF_SIZE = 65536;
+    char buf[BUF_SIZE];
+    ssize_t total = 0;
+
+    while (true) {
+        ssize_t n = read(src_fd, buf, sizeof(buf));
+
+        if (n == 0) {           // EOF — peer closed their write end
+            *got_eof = true;
+            break;
+        }
+        if (n == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // fully drained
+            if (errno == EINTR) continue;
+            return -1;          // hard read error
+        }
+
+        // Write the whole chunk — keep retrying on EINTR / short writes
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(dst_fd, buf + written, static_cast<size_t>(n - written));
+            if (w == -1) {
+                if (errno == EINTR) continue;
+                return -1;      // EPIPE / ECONNRESET etc.
+            }
+            written += w;
+        }
+        total += n;
+    }
+    return total;
+}
+
+// ---------------------------------------------------------------------------
+// handle_active — bidirectional data forwarding.
+//
+// EPOLLIN on client_fd  → read from client,  write to backend_fd
+// EPOLLIN on backend_fd → read from backend, write to client_fd
+// EOF on either side    → shutdown the write end of the peer (half-close),
+//                         then tear down once both directions are done.
 // ---------------------------------------------------------------------------
 
 void EventLoop::handle_active(Connection& conn, int fd, uint32_t events) {
-    (void)events;
-    std::cout << "[conn ] data ready on fd=" << fd
-              << "  (splice forwarding — Day 4)\n";
-    // TODO Day 4: read from fd, write to peer fd
-    close_connection(conn);
+    if (!(events & (EPOLLIN | EPOLLRDHUP))) return;
+
+    bool got_eof = false;
+
+    if (fd == conn.client_fd && !conn.client_eof) {
+        // Client → backend
+        ssize_t n = splice_once(conn.client_fd, conn.backend_fd, &got_eof);
+        if (n == -1) {
+            close_connection(conn);
+            return;
+        }
+        conn.bytes_client_to_backend += static_cast<uint64_t>(n);
+
+        if (got_eof) {
+            conn.client_eof = true;
+            // Notify backend that no more data is coming from the client
+            shutdown(conn.backend_fd, SHUT_WR);
+        }
+
+    } else if (fd == conn.backend_fd && !conn.backend_eof) {
+        // Backend → client
+        ssize_t n = splice_once(conn.backend_fd, conn.client_fd, &got_eof);
+        if (n == -1) {
+            close_connection(conn);
+            return;
+        }
+        conn.bytes_backend_to_client += static_cast<uint64_t>(n);
+
+        if (got_eof) {
+            conn.backend_eof = true;
+            // Notify client that no more data is coming from the backend
+            shutdown(conn.client_fd, SHUT_WR);
+        }
+    }
+
+    // Once both directions are finished, log stats and close
+    if (conn.client_eof && conn.backend_eof) {
+        std::cout << "[conn ] closed  client_fd=" << conn.client_fd
+                  << "  ↑" << conn.bytes_client_to_backend
+                  << "B  ↓" << conn.bytes_backend_to_client << "B\n";
+        close_connection(conn);
+    }
 }
 
 // ---------------------------------------------------------------------------
